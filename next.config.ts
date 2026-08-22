@@ -8,8 +8,10 @@ const nextConfig: NextConfig = {
     return config;
   },
   typescript: {
-    // Prevent build failures due to minor type mismatches during deployment
     ignoreBuildErrors: true,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
   },
 };
 

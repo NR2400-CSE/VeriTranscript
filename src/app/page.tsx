@@ -59,7 +59,10 @@ export default function Home() {
           <div className="pt-2 text-xs text-slate-500 dark:text-slate-400 font-mono">
             {isConnected ? (
               <span className="px-3 py-1 bg-white/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-full shadow-sm">
-                Connected Address: <strong className="text-slate-800 dark:text-slate-200">{address?.slice(0, 6)}...{address?.slice(-4)}</strong>
+                Connected Address:{" "}
+                <strong className="text-slate-800 dark:text-slate-200">
+                  {address?.slice(0, 6)}...{address?.slice(-4)}
+                </strong>
               </span>
             ) : (
               <span>Ready for MetaMask Connection</span>
@@ -73,12 +76,17 @@ export default function Home() {
             <div className="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-600 dark:text-blue-400 text-xl font-bold">
               🏛
             </div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-white">University Issuance</h3>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+              University Issuance
+            </h3>
             <p className="text-slate-600 dark:text-slate-400 text-xs leading-relaxed">
               Registrars issue single credentials or batch rosters via CSV. Generates SHA-256 document digests on-chain without storing private data publicly.
             </p>
             <div className="pt-2">
-              <Link href="/issuer" className="text-xs text-blue-600 dark:text-blue-400 hover:underline font-semibold flex items-center gap-1">
+              <Link
+                href="/issuer"
+                className="text-xs text-blue-600 dark:text-blue-400 hover:underline font-semibold flex items-center gap-1"
+              >
                 <span>Open Portal</span>
                 <span>&rarr;</span>
               </Link>
@@ -89,12 +97,17 @@ export default function Home() {
             <div className="w-12 h-12 rounded-2xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-600 dark:text-purple-400 text-xl font-bold">
               🎓
             </div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Self-Sovereign Vault</h3>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+              Self-Sovereign Vault
+            </h3>
             <p className="text-slate-600 dark:text-slate-400 text-xs leading-relaxed">
               Students own their academic records directly in their Web3 wallet with Soulbound profile avatars, PDF exports, and shareable QR verification codes.
             </p>
             <div className="pt-2">
-              <Link href="/student" className="text-xs text-purple-600 dark:text-purple-400 hover:underline font-semibold flex items-center gap-1">
+              <Link
+                href="/student"
+                className="text-xs text-purple-600 dark:text-purple-400 hover:underline font-semibold flex items-center gap-1"
+              >
                 <span>Open Student Vault</span>
                 <span>&rarr;</span>
               </Link>
@@ -105,12 +118,17 @@ export default function Home() {
             <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-600 dark:text-emerald-400 text-xl font-bold">
               ⚡
             </div>
-            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Instant Verifier</h3>
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+              Instant Verifier
+            </h3>
             <p className="text-slate-600 dark:text-slate-400 text-xs leading-relaxed">
               Employers verify authenticity in milliseconds with zero login required by comparing client-side file digests against the immutable registry.
             </p>
             <div className="pt-2">
-              <Link href="/verify" className="text-xs text-emerald-600 dark:text-emerald-400 hover:underline font-semibold flex items-center gap-1">
+              <Link
+                href="/verify"
+                className="text-xs text-emerald-600 dark:text-emerald-400 hover:underline font-semibold flex items-center gap-1"
+              >
                 <span>Test Document Verifier</span>
                 <span>&rarr;</span>
               </Link>
