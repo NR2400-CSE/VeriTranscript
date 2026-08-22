@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import Providers from "./providers";
+import { Providers } from "./providers";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "VeriTranscript",
-  description: "Tamper-proof credential verification",
+  description: "Tamper-Proof Academic Transcripts on the Blockchain",
 };
 
 export default function RootLayout({

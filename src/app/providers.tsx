@@ -1,40 +1,36 @@
 "use client";
 
-import * as React from "react";
-import {
-  RainbowKitProvider,
-  getDefaultConfig,
-  getDefaultWallets,
-} from "@rainbow-me/rainbowkit";
-import { hardhat, polygonAmoy } from "wagmi/chains";
+import React, { useState, useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WagmiProvider, http } from "wagmi";
+import { WagmiProvider, createConfig, http } from "wagmi";
+import { polygonAmoy } from "wagmi/chains";
+import { RainbowKitProvider, getDefaultConfig } from "@rainbow-me/rainbowkit";
 import "@rainbow-me/rainbowkit/styles.css";
 
 const config = getDefaultConfig({
   appName: "VeriTranscript",
-  projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "3a8170812b534d0ff9d794f19a901d64", // standard fallback demo id
-  chains: [hardhat, polygonAmoy],
-  transports: {
-    [hardhat.id]: http("http://127.0.0.1:8545"),
-    [polygonAmoy.id]: http(),
-  },
+  projectId: "YOUR_WALLET_CONNECT_PROJECT_ID", // standard fallback id or your WalletConnect ID
+  chains: [polygonAmoy],
   ssr: true,
 });
 
-const queryClient = new QueryClient();
-
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => setMounted(true), []);
+  const [queryClient] = useState(() => new QueryClient());
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   return (
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider>
-          {mounted && children}
+          {mounted ? children : <div style={{ visibility: "hidden" }}>{children}</div>}
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );
 }
+
+export default Providers;
