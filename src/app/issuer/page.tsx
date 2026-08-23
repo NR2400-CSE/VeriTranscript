@@ -1,38 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
-import { createPublicClient, http, decodeEventLog } from "viem";
-import { hardhat } from "viem/chains";
-import Link from "next/link";
-
-const publicClient = createPublicClient({
-  chain: hardhat,
-  transport: http("http://127.0.0.1:8545"),
-});
+import { useState, useEffect } from "react";
+import { useWriteContract, useAccount } from "wagmi";
 
 const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ||
   "0x5FbDB2315678afecb367f032d93F642f64180aa3") as `0x${string}`;
 
 const CONTRACT_ABI = [
-  {
-    inputs: [],
-    stateMutability: "nonpayable",
-    type: "constructor",
-  },
-  {
-    anonymous: false,
-    inputs: [
-      { indexed: true, internalType: "bytes32", name: "docHash", type: "bytes32" },
-      { indexed: true, internalType: "address", name: "student", type: "address" },
-      { indexed: false, internalType: "string", name: "ipfsURI", type: "string" },
-      { indexed: false, internalType: "string", name: "studentName", type: "string" },
-      { indexed: false, internalType: "string", name: "degreeName", type: "string" },
-      { indexed: false, internalType: "uint256", name: "timestamp", type: "uint256" },
-    ],
-    name: "CredentialIssued",
-    type: "event",
-  },
   {
     inputs: [
       { internalType: "bytes32", name: "_docHash", type: "bytes32" },
@@ -46,692 +20,417 @@ const CONTRACT_ABI = [
     stateMutability: "nonpayable",
     type: "function",
   },
-  {
-    inputs: [{ internalType: "bytes32", name: "_docHash", type: "bytes32" }],
-    name: "verifyCredential",
-    outputs: [
-      {
-        components: [
-          { internalType: "bool", name: "isValid", type: "bool" },
-          { internalType: "address", name: "student", type: "address" },
-          { internalType: "string", name: "ipfsURI", type: "string" },
-          { internalType: "string", name: "studentName", type: "string" },
-          { internalType: "string", name: "degreeName", type: "string" },
-          { internalType: "uint256", name: "issueTimestamp", type: "uint256" },
-        ],
-        internalType: "struct AcademicCredentialRegistry.Credential",
-        name: "",
-        type: "tuple",
-      },
-    ],
-    stateMutability: "view",
-    type: "function",
-  },
 ] as const;
 
-interface IssuedAuditRecord {
+interface IssuedRecord {
+  id: string;
   docHash: string;
-  studentAddress: string;
   studentName: string;
   degreeName: string;
+  studentAddress: string;
+  fileName: string;
+  fileData: string;
   issuedAt: string;
-  isRevoked?: boolean;
-}
-
-interface BatchStudentEntry {
-  studentName: string;
-  degreeName: string;
-  studentAddress: string;
-  status: "pending" | "processing" | "completed" | "error";
-  docHash?: string;
-  error?: string;
+  isRevoked: boolean;
 }
 
 export default function IssuerPage() {
   const { isConnected } = useAccount();
-  const [activeTab, setActiveTab] = useState<"single" | "batch">("single");
+  const [tab, setTab] = useState<"single" | "batch">("single");
 
-  // Single form states
   const [studentName, setStudentName] = useState("");
   const [degreeName, setDegreeName] = useState("");
   const [studentAddress, setStudentAddress] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [docHash, setDocHash] = useState<string>("");
-  const [statusMsg, setStatusMsg] = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+  const [records, setRecords] = useState<IssuedRecord[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
 
-  // Batch states
-  const [batchList, setBatchList] = useState<BatchStudentEntry[]>([]);
-  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const { writeContractAsync } = useWriteContract();
 
-  // Audit logs
-  const [auditLogs, setAuditLogs] = useState<IssuedAuditRecord[]>([]);
-  const [isLoadingLogs, setIsLoadingLogs] = useState(true);
-
-  const { data: hash, writeContractAsync } = useWriteContract();
-
-  const { isLoading: isConfirming, isSuccess: isConfirmed } =
-    useWaitForTransactionReceipt({
-      hash,
-    });
-
-  const fetchAuditLogs = useCallback(async () => {
-    setIsLoadingLogs(true);
+  const fetchAllStoredRecords = (): IssuedRecord[] => {
+    const raw = typeof window !== "undefined" ? localStorage.getItem("veritranscript_vault") : null;
+    if (!raw) return [];
     try {
-      const logs = await publicClient.getLogs({
-        address: CONTRACT_ADDRESS,
-        fromBlock: 0n,
-        toBlock: "latest",
-      });
+      const parsed = JSON.parse(raw);
+      const list: IssuedRecord[] = [];
 
-      const revokedMap = JSON.parse(
-        localStorage.getItem("veritranscript_revocations") || "{}"
-      );
-
-      const records: IssuedAuditRecord[] = [];
-
-      for (const log of logs) {
-        try {
-          const decoded: any = decodeEventLog({
-            abi: CONTRACT_ABI,
-            data: log.data,
-            topics: log.topics,
+      if (Array.isArray(parsed)) {
+        parsed.forEach((item: any, idx: number) => {
+          list.push({
+            id: item.docHash || `rec-${idx}`,
+            studentAddress: item.studentAddress || item.student || "0x00",
+            studentName: item.studentName || item.name || "Student",
+            degreeName: item.degreeName || item.degree || "Degree",
+            docHash: item.docHash || `0x${idx}`,
+            fileName: item.fileName || "Document.pdf",
+            fileData: item.fileData || "",
+            issuedAt: item.issuedAt || new Date().toLocaleDateString(),
+            isRevoked: Boolean(item.isRevoked),
           });
-
-          if (decoded.eventName === "CredentialIssued") {
-            const timestampNum = Number(decoded.args.timestamp);
-            const dateStr = timestampNum
-              ? new Date(timestampNum * 1000).toLocaleString()
-              : new Date().toLocaleString();
-
-            const dHash = decoded.args.docHash.toLowerCase();
-
-            records.unshift({
-              docHash: decoded.args.docHash,
-              studentAddress: decoded.args.student,
-              studentName: decoded.args.studentName,
-              degreeName: decoded.args.degreeName,
-              issuedAt: dateStr,
-              isRevoked: Boolean(revokedMap[dHash]),
-            });
-          }
-        } catch {}
+        });
+      } else if (typeof parsed === "object") {
+        let idx = 0;
+        for (const [addr, data] of Object.entries(parsed) as any) {
+          list.push({
+            id: data.docHash || `rec-${idx}-${addr}`,
+            studentAddress: addr,
+            studentName: data.studentName || data.name || "Student",
+            degreeName: data.degreeName || data.degree || "Degree",
+            docHash: data.docHash || `0x${idx}`,
+            fileName: data.fileName || "Document.pdf",
+            fileData: data.fileData || "",
+            issuedAt: data.issuedAt || new Date().toLocaleDateString(),
+            isRevoked: Boolean(data.isRevoked),
+          });
+          idx++;
+        }
       }
-
-      setAuditLogs(records);
-    } catch (err) {
-      console.error("Failed to load audit logs:", err);
-    } finally {
-      setIsLoadingLogs(false);
+      return list;
+    } catch {
+      return [];
     }
-  }, []);
-
-  useEffect(() => {
-    fetchAuditLogs();
-  }, [fetchAuditLogs]);
-
-  useEffect(() => {
-    if (isConfirmed) {
-      fetchAuditLogs();
-    }
-  }, [isConfirmed, fetchAuditLogs]);
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0) return;
-    const selectedFile = e.target.files[0];
-    setFile(selectedFile);
-
-    const arrayBuffer = await selectedFile.arrayBuffer();
-    const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hexHash =
-      "0x" + hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-    setDocHash(hexHash);
   };
 
-  const handleIssueCredential = async (e: React.FormEvent) => {
+  const syncRecords = () => {
+    const all = fetchAllStoredRecords();
+    setRecords([...all].reverse());
+  };
+
+  useEffect(() => {
+    syncRecords();
+    const interval = setInterval(syncRecords, 1500);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setSelectedFile(e.target.files[0]);
+    }
+  };
+
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = (error) => reject(error);
+    });
+  };
+
+  const handleIssue = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!studentName || !degreeName || !studentAddress || !docHash || !file) {
-      setStatusMsg("Please fill in all fields and select a file.");
+    if (!isConnected) {
+      setStatusMsg("Please connect MetaMask (Account #0 - Issuer).");
+      return;
+    }
+    if (!studentName || !degreeName || !studentAddress) {
+      setStatusMsg("Please fill in Student Name, Degree, and Wallet Address.");
       return;
     }
 
+    setIsSubmitting(true);
+    setStatusMsg("Reading file & calculating cryptographic hash...");
+
     try {
-      setIsSubmitting(true);
-      setStatusMsg("Submitting transaction to Hardhat blockchain...");
+      let base64Data = "";
+      let fileName = "Document.pdf";
+      let buffer: ArrayBuffer;
 
-      const fileBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      if (selectedFile) {
+        base64Data = await fileToBase64(selectedFile);
+        fileName = selectedFile.name;
+        buffer = await selectedFile.arrayBuffer();
+      } else {
+        buffer = new ArrayBuffer(32);
+      }
 
-      const mockIpfsURI = `ipfs://local-transcript-${Date.now()}`;
-      const contractAddress = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ||
-        "0x5FbDB2315678afecb367f032d93F642f64180aa3") as `0x${string}`;
+      const metaBytes = new TextEncoder().encode(`${studentName}-${degreeName}-${studentAddress}-${Date.now()}`);
+      const combinedBuffer = new Uint8Array(buffer.byteLength + metaBytes.byteLength);
+      combinedBuffer.set(new Uint8Array(buffer), 0);
+      combinedBuffer.set(metaBytes, buffer.byteLength);
+
+      const hashBuffer = await crypto.subtle.digest("SHA-256", combinedBuffer);
+      const hexHash =
+        "0x" +
+        Array.from(new Uint8Array(hashBuffer))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+
+      setStatusMsg("Broadcasting transaction to blockchain...");
 
       await writeContractAsync({
-        address: contractAddress,
+        address: CONTRACT_ADDRESS,
         abi: CONTRACT_ABI,
         functionName: "issueCredential",
         args: [
-          docHash as `0x${string}`,
+          hexHash as `0x${string}`,
           studentAddress as `0x${string}`,
-          mockIpfsURI,
+          `ipfs://transcript-${Date.now()}`,
           studentName,
           degreeName,
         ],
+        gas: BigInt(500000),
       });
 
-      const studentKey = studentAddress.trim().toLowerCase();
-      const existingVault = JSON.parse(
-        localStorage.getItem("veritranscript_vault") || "{}"
-      );
-
-      existingVault[studentKey] = {
-        studentName: studentName.trim(),
-        degreeName: degreeName.trim(),
-        docHash: docHash,
-        fileName: file.name,
-        fileData: fileBase64,
+      const newRecord: IssuedRecord = {
+        id: hexHash,
+        studentName,
+        degreeName,
+        studentAddress,
+        docHash: hexHash,
+        fileName,
+        fileData: base64Data,
         issuedAt: new Date().toLocaleString(),
+        isRevoked: false,
       };
 
-      localStorage.setItem("veritranscript_vault", JSON.stringify(existingVault));
+      const existing = fetchAllStoredRecords();
+      const updated = [newRecord, ...existing];
+      localStorage.setItem("veritranscript_vault", JSON.stringify(updated));
 
-      setStatusMsg("Transaction submitted! Waiting for confirmation...");
+      setRecords(updated);
+      setStatusMsg("✓ Credential issued & full document stored successfully!");
+      setStudentName("");
+      setDegreeName("");
+      setStudentAddress("");
+      setSelectedFile(null);
     } catch (err: any) {
       console.error(err);
-      setStatusMsg(`Error: ${err?.message || "Transaction failed"}`);
+      setStatusMsg(`Error: ${err?.shortMessage || err?.message || "Failed"}`);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // CSV Batch Parsing
-  const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0) return;
-    const csvFile = e.target.files[0];
+  const handleRevoke = (recordToUpdate: IssuedRecord) => {
+    const existing = fetchAllStoredRecords();
+    const updated = existing.map((r) => {
+      const match =
+        r.id === recordToUpdate.id ||
+        (r.studentAddress.toLowerCase() === recordToUpdate.studentAddress.toLowerCase() &&
+          r.degreeName.toLowerCase() === recordToUpdate.degreeName.toLowerCase());
+      return match ? { ...r, isRevoked: true } : r;
+    });
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      const lines = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-      
-      const parsed: BatchStudentEntry[] = [];
-      // Skip header line if it contains 'name'
-      const startIdx = lines[0].toLowerCase().includes("name") ? 1 : 0;
-
-      for (let i = startIdx; i < lines.length; i++) {
-        const parts = lines[i].split(",").map((p) => p.trim().replace(/^["']|["']$/g, ""));
-        if (parts.length >= 3) {
-          parsed.push({
-            studentName: parts[0],
-            degreeName: parts[1],
-            studentAddress: parts[2],
-            status: "pending",
-          });
-        }
-      }
-      setBatchList(parsed);
-    };
-    reader.readAsText(csvFile);
+    localStorage.setItem("veritranscript_vault", JSON.stringify(updated));
+    setRecords([...updated].reverse());
+    setStatusMsg(`✓ Revoked credential for ${recordToUpdate.studentName}`);
+    setTimeout(() => setStatusMsg(""), 3000);
   };
 
-  const downloadSampleCSV = () => {
-    const sample = `StudentName,DegreeName,StudentWalletAddress\nAlice Doe,Bachelor of Computer Science,0x5e3f7ad8cf6d8d138473f6b91fac83ef6f2f1333\nKrishna Garg,BTECH IN ECE,0x41b7162cd09310ec14637b41d9a827c22d79038f\nNaman Raj,BTECH IN CSE,0x195c6be43f03317e26235905a09a15da4210e3f7`;
-    const blob = new Blob([sample], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "veritranscript_batch_sample.csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const handleReinstate = (recordToUpdate: IssuedRecord) => {
+    const existing = fetchAllStoredRecords();
+    const updated = existing.map((r) => {
+      const match =
+        r.id === recordToUpdate.id ||
+        (r.studentAddress.toLowerCase() === recordToUpdate.studentAddress.toLowerCase() &&
+          r.degreeName.toLowerCase() === recordToUpdate.degreeName.toLowerCase());
+      return match ? { ...r, isRevoked: false } : r;
+    });
+
+    localStorage.setItem("veritranscript_vault", JSON.stringify(updated));
+    setRecords([...updated].reverse());
+    setStatusMsg(`✓ Restored credential for ${recordToUpdate.studentName}`);
+    setTimeout(() => setStatusMsg(""), 3000);
   };
 
-  const processBatchMinting = async () => {
-    if (batchList.length === 0 || isBatchProcessing) return;
-    setIsBatchProcessing(true);
+  const activeCount = records.filter((r) => !r.isRevoked).length;
+  const revokedCount = records.filter((r) => r.isRevoked).length;
 
-    const contractAddress = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ||
-      "0x5FbDB2315678afecb367f032d93F642f64180aa3") as `0x${string}`;
-
-    const updatedList = [...batchList];
-
-    for (let i = 0; i < updatedList.length; i++) {
-      if (updatedList[i].status === "completed") continue;
-
-      updatedList[i].status = "processing";
-      setBatchList([...updatedList]);
-
-      try {
-        // Generate deterministic unique digest for batch row
-        const dataEncoder = new TextEncoder();
-        const rawBytes = dataEncoder.encode(
-          `${updatedList[i].studentName}-${updatedList[i].degreeName}-${updatedList[i].studentAddress}-${Date.now()}`
-        );
-        const hashBuf = await crypto.subtle.digest("SHA-256", rawBytes);
-        const hex =
-          "0x" +
-          Array.from(new Uint8Array(hashBuf))
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("");
-
-        const mockURI = `ipfs://batch-credential-${Date.now()}-${i}`;
-
-        await writeContractAsync({
-          address: contractAddress,
-          abi: CONTRACT_ABI,
-          functionName: "issueCredential",
-          args: [
-            hex as `0x${string}`,
-            updatedList[i].studentAddress as `0x${string}`,
-            mockURI,
-            updatedList[i].studentName,
-            updatedList[i].degreeName,
-          ],
-        });
-
-        // Store generated certificate
-        const studentKey = updatedList[i].studentAddress.trim().toLowerCase();
-        const existingVault = JSON.parse(
-          localStorage.getItem("veritranscript_vault") || "{}"
-        );
-        existingVault[studentKey] = {
-          studentName: updatedList[i].studentName,
-          degreeName: updatedList[i].degreeName,
-          docHash: hex,
-          fileName: `${updatedList[i].studentName.replace(/\s+/g, "_")}_Transcript.pdf`,
-          fileData: "",
-          issuedAt: new Date().toLocaleString(),
-        };
-        localStorage.setItem("veritranscript_vault", JSON.stringify(existingVault));
-
-        updatedList[i].status = "completed";
-        updatedList[i].docHash = hex;
-      } catch (err: any) {
-        console.error("Batch row failed:", err);
-        updatedList[i].status = "error";
-        updatedList[i].error = err?.shortMessage || err?.message || "Transaction rejected";
-      }
-
-      setBatchList([...updatedList]);
-    }
-
-    setIsBatchProcessing(false);
-    fetchAuditLogs();
-  };
-
-  const toggleRevokeStatus = (targetHash: string, currentStatus?: boolean) => {
-    const revokedMap = JSON.parse(
-      localStorage.getItem("veritranscript_revocations") || "{}"
-    );
-    const key = targetHash.toLowerCase();
-
-    if (currentStatus) {
-      delete revokedMap[key];
-    } else {
-      revokedMap[key] = {
-        revokedAt: new Date().toLocaleString(),
-        reason: "Administrative Action / Certificate Revoked by University",
-      };
-    }
-
-    localStorage.setItem("veritranscript_revocations", JSON.stringify(revokedMap));
-    fetchAuditLogs();
-  };
-
-  const activeCount = auditLogs.filter((l) => !l.isRevoked).length;
-  const revokedCount = auditLogs.filter((l) => l.isRevoked).length;
+  const filteredRecords = records.filter(
+    (r) =>
+      r.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      r.studentAddress.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      r.degreeName.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center py-12 px-4">
-      <div className="max-w-4xl w-full space-y-8">
-        <div className="text-center space-y-2">
-          <h1 className="text-3xl font-bold tracking-tight">University Portal</h1>
-          <p className="text-slate-400 text-sm">
-            Issue cryptographically verifiable academic credentials on-chain.
-          </p>
+    <div className="max-w-5xl mx-auto px-6 py-12 space-y-10">
+      <div className="text-center space-y-2">
+        <h1 className="text-3xl font-extrabold tracking-tight">University Portal</h1>
+        <p className="text-sm text-slate-400">
+          Issue cryptographically verifiable academic credentials on-chain.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+            Active Credentials
+          </span>
+          <p className="text-3xl font-black text-emerald-400 mt-2">{activeCount}</p>
         </div>
 
-        {/* Counter Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-            <span className="text-xs uppercase tracking-wider font-semibold text-slate-500">
-              Active Credentials
-            </span>
-            <p className="text-2xl font-bold text-emerald-400 mt-1">{activeCount}</p>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-            <span className="text-xs uppercase tracking-wider font-semibold text-slate-500">
-              Revoked Credentials
-            </span>
-            <p className="text-2xl font-bold text-rose-400 mt-1">{revokedCount}</p>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-lg">
-            <span className="text-xs uppercase tracking-wider font-semibold text-slate-500">
-              Contract Network
-            </span>
-            <p className="text-2xl font-bold text-purple-400 mt-1">Hardhat 31337</p>
-          </div>
+        <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+            Revoked Credentials
+          </span>
+          <p className="text-3xl font-black text-rose-500 mt-2">{revokedCount}</p>
         </div>
 
-        {/* Issuance Workspace Card */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl space-y-6">
-          {/* Mode Switcher Tabs */}
-          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-            <h2 className="text-xl font-bold text-slate-200">
-              {activeTab === "single" ? "Single Student Issuance" : "Batch CSV Issuance"}
-            </h2>
+        <div className="bg-slate-900/80 border border-slate-800 p-5 rounded-2xl">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+            Contract Network
+          </span>
+          <p className="text-2xl font-black text-purple-400 mt-2">Hardhat 31337</p>
+        </div>
+      </div>
 
-            <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-semibold">
-              <button
-                onClick={() => setActiveTab("single")}
-                className={`px-3 py-1.5 rounded-lg transition ${
-                  activeTab === "single"
-                    ? "bg-blue-600 text-white"
-                    : "text-slate-400 hover:text-slate-200"
-                }`}
-              >
-                Single Entry
-              </button>
-              <button
-                onClick={() => setActiveTab("batch")}
-                className={`px-3 py-1.5 rounded-lg transition ${
-                  activeTab === "batch"
-                    ? "bg-blue-600 text-white"
-                    : "text-slate-400 hover:text-slate-200"
-                }`}
-              >
-                Batch Upload CSV
-              </button>
+      <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-8 space-y-6">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+          <h2 className="text-lg font-bold">Single Student Issuance</h2>
+        </div>
+
+        <form onSubmit={handleIssue} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300">
+                Student Full Name
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Krishna Garg"
+                value={studentName}
+                onChange={(e) => setStudentName(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300">
+                Degree / Certificate Name
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Pan Card"
+                value={degreeName}
+                onChange={(e) => setDegreeName(e.target.value)}
+                className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm focus:outline-none focus:border-blue-500"
+              />
             </div>
           </div>
 
-          {/* Single Form Tab */}
-          {activeTab === "single" ? (
-            <form onSubmit={handleIssueCredential} className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
-                    Student Full Name
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Alice Doe"
-                    value={studentName}
-                    onChange={(e) => setStudentName(e.target.value)}
-                    className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-blue-500"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">
-                    Degree / Certificate Name
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Bachelor of Technology"
-                    value={degreeName}
-                    onChange={(e) => setDegreeName(e.target.value)}
-                    className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-blue-500"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Student Wallet Address
-                </label>
-                <input
-                  type="text"
-                  placeholder="0x..."
-                  value={studentAddress}
-                  onChange={(e) => setStudentAddress(e.target.value)}
-                  className="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white focus:outline-none focus:border-blue-500 font-mono text-sm"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Official Transcript PDF
-                </label>
-                <div className="border-2 border-dashed border-slate-800 rounded-xl p-6 text-center hover:border-blue-500 transition-colors">
-                  <input
-                    type="file"
-                    id="file-upload"
-                    onChange={handleFileChange}
-                    className="hidden"
-                    accept=".pdf,.doc,.docx"
-                  />
-                  <label
-                    htmlFor="file-upload"
-                    className="cursor-pointer flex flex-col items-center"
-                  >
-                    <span className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium text-white mb-2 transition">
-                      Choose file
-                    </span>
-                    <span className="text-sm text-slate-400">
-                      {file ? file.name : "Select a transcript file"}
-                    </span>
-                  </label>
-                </div>
-              </div>
-
-              {docHash && (
-                <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl">
-                  <p className="text-xs text-slate-500 font-medium mb-1">
-                    Client-Side SHA-256 Digest:
-                  </p>
-                  <p className="text-xs font-mono text-blue-400 break-all">{docHash}</p>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={!isConnected || isSubmitting || isConfirming}
-                className="w-full py-3.5 px-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white font-semibold rounded-xl shadow-lg transition duration-200 cursor-pointer"
-              >
-                {isSubmitting || isConfirming
-                  ? "Processing on Blockchain..."
-                  : "Issue Credential on Blockchain"}
-              </button>
-
-              {statusMsg && (
-                <div className="mt-4 p-3 bg-slate-950 border border-slate-800 rounded-xl text-center text-sm text-slate-300">
-                  {statusMsg}
-                </div>
-              )}
-
-              {isConfirmed && (
-                <div className="mt-4 p-3 bg-emerald-950/50 border border-emerald-500/50 rounded-xl text-center text-sm text-emerald-300">
-                  ✓ Credential successfully confirmed on blockchain!
-                </div>
-              )}
-            </form>
-          ) : (
-            /* Batch Upload Tab */
-            <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 bg-slate-950 border border-slate-800 rounded-xl">
-                <div>
-                  <h3 className="text-sm font-semibold text-white">Upload Graduation CSV</h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Columns: StudentName, DegreeName, StudentWalletAddress
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={downloadSampleCSV}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-blue-400 text-xs font-semibold rounded-lg border border-slate-700 transition cursor-pointer"
-                >
-                  Download Sample CSV
-                </button>
-              </div>
-
-              <div className="border-2 border-dashed border-slate-800 rounded-xl p-6 text-center hover:border-blue-500 transition-colors">
-                <input
-                  type="file"
-                  id="csv-upload"
-                  onChange={handleCSVUpload}
-                  className="hidden"
-                  accept=".csv,.txt"
-                />
-                <label htmlFor="csv-upload" className="cursor-pointer flex flex-col items-center">
-                  <span className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium text-white mb-2 transition">
-                    Select CSV File
-                  </span>
-                  <span className="text-sm text-slate-400">
-                    {batchList.length > 0
-                      ? `${batchList.length} students loaded from CSV`
-                      : "Upload .csv graduating student roster"}
-                  </span>
-                </label>
-              </div>
-
-              {batchList.length > 0 && (
-                <div className="space-y-4">
-                  <div className="overflow-x-auto max-h-60 overflow-y-auto border border-slate-800 rounded-xl">
-                    <table className="w-full text-left text-xs text-slate-400">
-                      <thead className="bg-slate-950 text-slate-300 uppercase tracking-wider text-[11px] sticky top-0">
-                        <tr>
-                          <th className="py-2.5 px-3">Student</th>
-                          <th className="py-2.5 px-3">Degree</th>
-                          <th className="py-2.5 px-3">Wallet</th>
-                          <th className="py-2.5 px-3 text-right">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800 font-mono">
-                        {batchList.map((st, i) => (
-                          <tr key={i} className="hover:bg-slate-800/30">
-                            <td className="py-2 px-3 font-sans text-white">{st.studentName}</td>
-                            <td className="py-2 px-3 font-sans text-slate-300">{st.degreeName}</td>
-                            <td className="py-2 px-3 text-blue-400">
-                              {st.studentAddress.slice(0, 6)}...{st.studentAddress.slice(-4)}
-                            </td>
-                            <td className="py-2 px-3 text-right font-sans">
-                              {st.status === "completed" && (
-                                <span className="text-emerald-400 font-semibold">✓ Issued</span>
-                              )}
-                              {st.status === "processing" && (
-                                <span className="text-blue-400 animate-pulse font-semibold">
-                                  Minting...
-                                </span>
-                              )}
-                              {st.status === "pending" && (
-                                <span className="text-slate-500">Pending</span>
-                              )}
-                              {st.status === "error" && (
-                                <span className="text-rose-400 font-semibold">Failed</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={processBatchMinting}
-                    disabled={!isConnected || isBatchProcessing}
-                    className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white font-semibold rounded-xl shadow-lg transition duration-200 cursor-pointer"
-                  >
-                    {isBatchProcessing
-                      ? "Executing Sequential Blockchain Mints..."
-                      : `Issue All ${batchList.length} Credentials on Blockchain`}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Audit Log Table */}
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-slate-200">On-Chain Issuance Audit Log</h2>
-            <button
-              onClick={fetchAuditLogs}
-              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition cursor-pointer"
-            >
-              Refresh
-            </button>
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-slate-300">
+              Student Wallet Address
+            </label>
+            <input
+              type="text"
+              placeholder="0x..."
+              value={studentAddress}
+              onChange={(e) => setStudentAddress(e.target.value)}
+              className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm font-mono focus:outline-none focus:border-blue-500"
+            />
           </div>
 
-          {isLoadingLogs ? (
-            <p className="text-sm text-slate-400 animate-pulse py-4 text-center">
-              Loading issuance events from blockchain...
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-slate-300">
+              Official Document / Transcript File
+            </label>
+            <input
+              type="file"
+              onChange={handleFileChange}
+              className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-sm file:mr-4 file:py-1 file:px-3 file:rounded-lg file:border-0 file:bg-blue-600 file:text-white file:text-xs file:font-semibold cursor-pointer"
+            />
+          </div>
+
+          {statusMsg && (
+            <p className="text-xs font-mono text-center py-2 text-blue-400">
+              {statusMsg}
             </p>
-          ) : auditLogs.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs text-slate-400">
-                <thead className="bg-slate-950 text-slate-300 uppercase tracking-wider text-[11px] border-b border-slate-800">
-                  <tr>
-                    <th className="py-3 px-4">Student</th>
-                    <th className="py-3 px-4">Degree</th>
-                    <th className="py-3 px-4">Wallet Address</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4">Issued Date</th>
-                    <th className="py-3 px-4 text-right">Actions</th>
+          )}
+
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white font-bold rounded-xl shadow-lg transition cursor-pointer"
+          >
+            {isSubmitting ? "Processing Transaction..." : "Issue Credential"}
+          </button>
+        </form>
+      </div>
+
+      <div className="bg-slate-900/80 border border-slate-800 rounded-3xl p-8 space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          <div>
+            <h2 className="text-lg font-bold">Credential Registry &amp; Lifecycle Management</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Live records of issued credentials with revocation/reinstatement controls.
+            </p>
+          </div>
+          <input
+            type="text"
+            placeholder="Search by student, degree, or address..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs focus:outline-none focus:border-blue-500 w-full sm:w-64"
+          />
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
+                <th className="pb-3 px-2">Student</th>
+                <th className="pb-3 px-2">Degree</th>
+                <th className="pb-3 px-2">Wallet Address</th>
+                <th className="pb-3 px-2">Status</th>
+                <th className="pb-3 px-2 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60">
+              {filteredRecords.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-slate-500">
+                    No credentials found.
+                  </td>
+                </tr>
+              ) : (
+                filteredRecords.map((rec, i) => (
+                  <tr key={rec.id || i} className="hover:bg-slate-800/30 transition">
+                    <td className="py-3 px-2 font-medium text-white">{rec.studentName}</td>
+                    <td className="py-3 px-2 text-slate-300">{rec.degreeName}</td>
+                    <td className="py-3 px-2 font-mono text-slate-400">
+                      {rec.studentAddress.slice(0, 8)}...{rec.studentAddress.slice(-6)}
+                    </td>
+                    <td className="py-3 px-2">
+                      {rec.isRevoked ? (
+                        <span className="px-2 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-[10px] font-bold">
+                          REVOKED
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold">
+                          ACTIVE
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3 px-2 text-right">
+                      {rec.isRevoked ? (
+                        <button
+                          type="button"
+                          onClick={() => handleReinstate(rec)}
+                          className="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/40 rounded-lg text-[11px] font-semibold transition cursor-pointer"
+                        >
+                          Restore / Reinstate
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleRevoke(rec)}
+                          className="px-2.5 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/40 rounded-lg text-[11px] font-semibold transition cursor-pointer"
+                        >
+                          Revoke / Terminate
+                        </button>
+                      )}
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 font-mono">
-                  {auditLogs.map((log, index) => (
-                    <tr key={index} className="hover:bg-slate-800/40 transition">
-                      <td className="py-3 px-4 font-sans font-medium text-white">
-                        {log.studentName}
-                      </td>
-                      <td className="py-3 px-4 font-sans text-slate-300">{log.degreeName}</td>
-                      <td className="py-3 px-4 text-blue-400">
-                        {log.studentAddress.slice(0, 6)}...{log.studentAddress.slice(-4)}
-                      </td>
-                      <td className="py-3 px-4 font-sans">
-                        {log.isRevoked ? (
-                          <span className="px-2 py-0.5 bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-full text-[10px] font-semibold">
-                            Revoked
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full text-[10px] font-semibold">
-                            Valid
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-slate-500 font-sans">{log.issuedAt}</td>
-                      <td className="py-3 px-4 text-right font-sans whitespace-nowrap">
-                        <div className="inline-flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => toggleRevokeStatus(log.docHash, log.isRevoked)}
-                            className={`w-16 py-1 border rounded-lg text-[11px] font-semibold text-center transition cursor-pointer ${
-                              log.isRevoked
-                                ? "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700"
-                                : "bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border-rose-500/30"
-                            }`}
-                          >
-                            {log.isRevoked ? "Restore" : "Revoke"}
-                          </button>
-                          <Link
-                            href={`/verify?hash=${log.docHash}`}
-                            className="w-14 py-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-lg text-[11px] font-semibold text-center transition inline-block"
-                          >
-                            Verify
-                          </Link>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="text-sm text-slate-400 py-4 text-center">
-              No credentials have been issued on this smart contract yet.
-            </p>
-          )}
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

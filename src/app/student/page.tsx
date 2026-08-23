@@ -39,12 +39,14 @@ interface CredentialRecord {
   studentName: string;
   degreeName: string;
   issuedAt: string;
+  isRevoked: boolean;
 }
 
 export default function StudentPage() {
   const { address, isConnected } = useAccount();
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [selectedQrHash, setSelectedQrHash] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [badgeModalCred, setBadgeModalCred] = useState<CredentialRecord | null>(null);
@@ -52,22 +54,41 @@ export default function StudentPage() {
 
   const badgeRef = useRef<HTMLDivElement>(null);
 
-  const fetchBlockchainCredentials = useCallback(async () => {
+  const fetchBlockchainCredentials = useCallback(async (isManual = false) => {
     if (!address) {
       setCredentials([]);
       setIsLoading(false);
       return;
     }
 
-    setIsLoading(true);
+    if (isManual) {
+      setIsRefreshing(true);
+    } else {
+      setIsLoading(true);
+    }
+
     try {
+      // 1. Fetch Local Vault Cache
+      const rawVault = localStorage.getItem("veritranscript_vault");
+      let vaultList: any[] = [];
+      if (rawVault) {
+        try {
+          const parsed = JSON.parse(rawVault);
+          vaultList = Array.isArray(parsed) ? parsed : Object.values(parsed);
+        } catch {}
+      }
+
+      // 2. Fetch Latest Block Number to ensure fresh log indexing
+      const latestBlock = await publicClient.getBlockNumber();
+
       const logs = await publicClient.getLogs({
         address: CONTRACT_ADDRESS,
         fromBlock: 0n,
-        toBlock: "latest",
+        toBlock: latestBlock,
       });
 
       const records: CredentialRecord[] = [];
+      const userAddr = address.toLowerCase();
 
       for (const log of logs) {
         try {
@@ -79,12 +100,19 @@ export default function StudentPage() {
 
           if (
             decoded.eventName === "CredentialIssued" &&
-            decoded.args.student.toLowerCase() === address.toLowerCase()
+            decoded.args.student.toLowerCase() === userAddr
           ) {
             const timestampNum = Number(decoded.args.timestamp);
             const dateStr = timestampNum
               ? new Date(timestampNum * 1000).toLocaleString()
               : new Date().toLocaleString();
+
+            const matchedVault = vaultList.find(
+              (v) =>
+                v.docHash?.toLowerCase() === decoded.args.docHash?.toLowerCase() ||
+                (v.studentAddress?.toLowerCase() === userAddr &&
+                  v.degreeName?.toLowerCase() === decoded.args.degreeName?.toLowerCase())
+            );
 
             records.push({
               docHash: decoded.args.docHash,
@@ -93,17 +121,62 @@ export default function StudentPage() {
               studentName: decoded.args.studentName,
               degreeName: decoded.args.degreeName,
               issuedAt: dateStr,
+              isRevoked: Boolean(matchedVault?.isRevoked),
             });
           }
         } catch {}
       }
 
-      setCredentials(records);
+      // 3. Fallback check for newly written local items
+      if (vaultList.length > 0) {
+        vaultList.forEach((item: any) => {
+          const itemAddr = (item.studentAddress || item.student || "").toLowerCase();
+          if (
+            itemAddr === userAddr &&
+            !records.some(
+              (r) =>
+                r.docHash?.toLowerCase() === item.docHash?.toLowerCase() ||
+                r.degreeName.toLowerCase() === (item.degreeName || item.degree || "").toLowerCase()
+            )
+          ) {
+            records.push({
+              docHash: item.docHash || `0x${Math.random().toString(16).slice(2)}`,
+              studentAddress: item.studentAddress || item.student,
+              ipfsURI: item.ipfsURI || "",
+              studentName: item.studentName || item.name || "Student",
+              degreeName: item.degreeName || item.degree || "Degree",
+              issuedAt: item.issuedAt || new Date().toLocaleString(),
+              isRevoked: Boolean(item.isRevoked),
+            });
+          }
+        });
+      }
+
+      setCredentials(records.reverse());
     } catch (err) {
       console.error("Failed to read logs:", err);
-      setCredentials([]);
+      // Fallback from localStorage directly if RPC fails
+      const rawVault = localStorage.getItem("veritranscript_vault");
+      if (rawVault) {
+        try {
+          const parsed = JSON.parse(rawVault);
+          const list = (Array.isArray(parsed) ? parsed : Object.values(parsed))
+            .filter((item: any) => (item.studentAddress || item.student || "").toLowerCase() === address.toLowerCase())
+            .map((item: any) => ({
+              docHash: item.docHash || "0x00",
+              studentAddress: item.studentAddress || item.student,
+              ipfsURI: item.ipfsURI || "",
+              studentName: item.studentName || item.name || "Student",
+              degreeName: item.degreeName || item.degree || "Degree",
+              issuedAt: item.issuedAt || new Date().toLocaleString(),
+              isRevoked: Boolean(item.isRevoked),
+            }));
+          setCredentials(list.reverse());
+        } catch {}
+      }
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   }, [address]);
 
@@ -111,36 +184,79 @@ export default function StudentPage() {
     fetchBlockchainCredentials();
   }, [fetchBlockchainCredentials]);
 
+  const generateFallbackPDF = (cred: CredentialRecord) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1200;
+    canvas.height = 800;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, 1200, 800);
+    ctx.strokeStyle = "#3b82f6";
+    ctx.lineWidth = 8;
+    ctx.strokeRect(30, 30, 1140, 740);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 40px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("VERITRANSCRIPT VERIFIED CREDENTIAL", 600, 150);
+
+    ctx.fillStyle = "#38bdf8";
+    ctx.font = "bold 50px sans-serif";
+    ctx.fillText(cred.studentName, 600, 300);
+
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "28px sans-serif";
+    ctx.fillText(`Conferred: ${cred.degreeName}`, 600, 380);
+
+    ctx.fillStyle = "#64748b";
+    ctx.font = "16px monospace";
+    ctx.fillText(`Wallet: ${cred.studentAddress}`, 600, 520);
+    ctx.fillText(`DocHash: ${cred.docHash}`, 600, 560);
+    ctx.fillText(`Timestamp: ${cred.issuedAt}`, 600, 600);
+
+    const a = document.createElement("a");
+    a.href = canvas.toDataURL("image/png");
+    a.download = `${cred.studentName}_${cred.degreeName}_Certificate.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   const handleDownloadPDF = (cred: CredentialRecord) => {
     try {
-      const storedVault = JSON.parse(
-        localStorage.getItem("veritranscript_vault") || "{}"
-      );
-      const savedDoc = storedVault[cred.studentAddress.toLowerCase()];
+      const raw = localStorage.getItem("veritranscript_vault");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        let found: any = null;
 
-      if (savedDoc && savedDoc.fileData) {
-        const byteCharacters = atob(savedDoc.fileData.split(",")[1]);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        if (Array.isArray(parsed)) {
+          found = parsed.find(
+            (item: any) =>
+              item.docHash?.toLowerCase() === cred.docHash?.toLowerCase() ||
+              (item.studentAddress?.toLowerCase() === cred.studentAddress.toLowerCase() &&
+                item.degreeName?.toLowerCase() === cred.degreeName?.toLowerCase())
+          );
+        } else if (typeof parsed === "object") {
+          found = parsed[cred.studentAddress.toLowerCase()];
         }
-        const byteArray = new Uint8Array(byteNumbers);
-        const blob = new Blob([byteArray], { type: "application/pdf" });
 
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = savedDoc.fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        return;
+        if (found && found.fileData && found.fileData.startsWith("data:")) {
+          const a = document.createElement("a");
+          a.href = found.fileData;
+          a.download = found.fileName || `${cred.studentName}_${cred.degreeName}.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          return;
+        }
       }
     } catch (e) {
-      console.error("Error retrieving document binary:", e);
+      console.error("Error downloading file:", e);
     }
-    alert("Document binary not found in local cache.");
+
+    generateFallbackPDF(cred);
   };
 
   const handleCopyLink = (hash: string) => {
@@ -152,10 +268,7 @@ export default function StudentPage() {
 
   const handleShareLinkedIn = (cred: CredentialRecord) => {
     const verifyUrl = encodeURIComponent(`${window.location.origin}/verify?hash=${cred.docHash}`);
-    window.open(
-      `https://www.linkedin.com/sharing/share-offsite/?url=${verifyUrl}`,
-      "_blank"
-    );
+    window.open(`https://www.linkedin.com/sharing/share-offsite/?url=${verifyUrl}`, "_blank");
   };
 
   const handleShareTwitter = (cred: CredentialRecord) => {
@@ -163,10 +276,7 @@ export default function StudentPage() {
     const text = encodeURIComponent(
       `🎓 Verified my tamper-proof academic credential on @VeriTranscript: ${cred.degreeName}!\n\nVerify on-chain here: `
     );
-    window.open(
-      `https://twitter.com/intent/tweet?text=${text}&url=${encodeURIComponent(verifyUrl)}`,
-      "_blank"
-    );
+    window.open(`https://twitter.com/intent/tweet?text=${text}&url=${encodeURIComponent(verifyUrl)}`, "_blank");
   };
 
   const handleDownloadBadgePNG = async (cred: CredentialRecord) => {
@@ -183,6 +293,7 @@ export default function StudentPage() {
   };
 
   const primaryStudentName = credentials[0]?.studentName || "Verified Student";
+  const activeCount = credentials.filter((c) => !c.isRevoked).length;
   const avatarUrl = address
     ? `https://api.dicebear.com/7.x/identicon/svg?seed=${address}`
     : `https://api.dicebear.com/7.x/identicon/svg?seed=VeriTranscript`;
@@ -197,7 +308,6 @@ export default function StudentPage() {
       </div>
 
       <div className="max-w-4xl w-full space-y-6">
-        {/* Soulbound Identity Profile Card */}
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-blue-600/10 rounded-full blur-3xl -z-0 pointer-events-none"></div>
 
@@ -205,11 +315,7 @@ export default function StudentPage() {
             <div className="flex items-center gap-4">
               <div className="w-16 h-16 rounded-2xl bg-slate-950 border border-slate-700 p-1 flex items-center justify-center overflow-hidden shrink-0 shadow-inner">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={avatarUrl}
-                  alt="Student Avatar"
-                  className="w-full h-full object-cover rounded-xl"
-                />
+                <img src={avatarUrl} alt="Student Avatar" className="w-full h-full object-cover rounded-xl" />
               </div>
 
               <div>
@@ -230,21 +336,22 @@ export default function StudentPage() {
 
             <div className="flex items-center gap-3 w-full md:w-auto">
               <div className="px-4 py-2 bg-slate-950/70 border border-slate-800 rounded-xl text-center flex-1 md:flex-none">
-                <span className="text-[10px] uppercase font-semibold text-slate-500">Credentials</span>
-                <p className="text-lg font-bold text-emerald-400">{credentials.length}</p>
+                <span className="text-[10px] uppercase font-semibold text-slate-500">Active</span>
+                <p className="text-lg font-bold text-emerald-400">{activeCount}</p>
               </div>
 
               <button
-                onClick={fetchBlockchainCredentials}
-                className="px-4 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition cursor-pointer flex-1 md:flex-none"
+                onClick={() => fetchBlockchainCredentials(true)}
+                disabled={isRefreshing}
+                className="px-4 py-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition cursor-pointer flex items-center justify-center gap-2 flex-1 md:flex-none"
               >
-                Refresh Ledger
+                <span className={isRefreshing ? "animate-spin" : ""}>🔄</span>
+                <span>{isRefreshing ? "Syncing..." : "Refresh Ledger"}</span>
               </button>
             </div>
           </div>
         </div>
 
-        {/* Credentials List Section */}
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-4">
           <h2 className="text-lg font-bold text-slate-200">Your Academic Credentials</h2>
 
@@ -256,14 +363,24 @@ export default function StudentPage() {
             credentials.map((cred, idx) => (
               <div
                 key={idx}
-                className="bg-slate-950/70 border border-slate-800 rounded-2xl p-5 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 hover:border-slate-700 transition"
+                className={`border rounded-2xl p-5 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 transition ${
+                  cred.isRevoked
+                    ? "bg-rose-950/20 border-rose-900/40"
+                    : "bg-slate-950/70 border-slate-800 hover:border-slate-700"
+                }`}
               >
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <h3 className="font-semibold text-base text-white">{cred.degreeName}</h3>
-                    <span className="px-2 py-0.5 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-medium rounded-full">
-                      Active &amp; Verified
-                    </span>
+                    {cred.isRevoked ? (
+                      <span className="px-2 py-0.5 bg-rose-500/20 border border-rose-500/30 text-rose-400 text-xs font-bold rounded-full">
+                        REVOKED / TERMINATED
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-medium rounded-full">
+                        Active &amp; Verified
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-400">
                     Student: <span className="text-slate-300 font-medium">{cred.studentName}</span>
@@ -279,29 +396,33 @@ export default function StudentPage() {
                     PDF
                   </button>
 
-                  <button
-                    onClick={() => {
-                      setBadgeModalCred(cred);
-                      setPrivacyMode(false);
-                    }}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-400 rounded-xl text-xs font-semibold transition cursor-pointer"
-                  >
-                    Share Badge
-                  </button>
+                  {!cred.isRevoked && (
+                    <>
+                      <button
+                        onClick={() => {
+                          setBadgeModalCred(cred);
+                          setPrivacyMode(false);
+                        }}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-400 rounded-xl text-xs font-semibold transition cursor-pointer"
+                      >
+                        Share Badge
+                      </button>
 
-                  <button
-                    onClick={() => handleCopyLink(cred.docHash)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition cursor-pointer"
-                  >
-                    {copiedHash === cred.docHash ? "✓ Copied" : "Copy Link"}
-                  </button>
+                      <button
+                        onClick={() => handleCopyLink(cred.docHash)}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition cursor-pointer"
+                      >
+                        {copiedHash === cred.docHash ? "✓ Copied" : "Copy Link"}
+                      </button>
 
-                  <button
-                    onClick={() => setSelectedQrHash(cred.docHash)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-blue-400 rounded-xl text-xs font-semibold transition cursor-pointer"
-                  >
-                    QR Code
-                  </button>
+                      <button
+                        onClick={() => setSelectedQrHash(cred.docHash)}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-blue-400 rounded-xl text-xs font-semibold transition cursor-pointer"
+                      >
+                        QR Code
+                      </button>
+                    </>
+                  )}
 
                   <Link
                     href={`/verify?hash=${cred.docHash}`}
@@ -317,23 +438,15 @@ export default function StudentPage() {
               <p className="text-sm text-slate-400">
                 No credentials found for this wallet address.
               </p>
-              <p className="text-xs text-slate-600">
-                Switch accounts in MetaMask or use the Demo Assistant auto-seeder to issue sample degrees.
-              </p>
             </div>
           )}
         </div>
       </div>
 
-      {/* QR Code Modal */}
       {selectedQrHash && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-sm w-full space-y-5 text-center shadow-2xl">
             <h3 className="text-lg font-bold text-white">Credential QR Code</h3>
-            <p className="text-xs text-slate-400">
-              Scan this code to instantly verify authenticity on-chain.
-            </p>
-
             <div className="p-4 bg-white rounded-xl inline-block">
               <QRCodeSVG
                 value={
@@ -345,11 +458,6 @@ export default function StudentPage() {
                 level="H"
               />
             </div>
-
-            <p className="text-[10px] font-mono text-slate-500 break-all">
-              {selectedQrHash}
-            </p>
-
             <button
               onClick={() => setSelectedQrHash(null)}
               className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-xl transition cursor-pointer"
@@ -360,16 +468,12 @@ export default function StudentPage() {
         </div>
       )}
 
-      {/* Social Sharing & Digital Badge Modal with Selective Disclosure */}
       {badgeModalCred && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-md w-full space-y-5 shadow-2xl text-center">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="text-left">
                 <h3 className="text-base font-bold text-white">Verified Academic Badge</h3>
-                <p className="text-[11px] text-slate-400">
-                  Export badge with optional Selective Disclosure masking.
-                </p>
               </div>
               <button
                 onClick={() => setPrivacyMode(!privacyMode)}
@@ -383,7 +487,6 @@ export default function StudentPage() {
               </button>
             </div>
 
-            {/* Renderable Badge Container */}
             <div
               ref={badgeRef}
               className="bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950/40 border border-blue-500/30 p-6 rounded-2xl text-left space-y-4 shadow-xl relative overflow-hidden"
@@ -415,14 +518,6 @@ export default function StudentPage() {
                     ? `${badgeModalCred.studentName[0]}**** ${badgeModalCred.studentName.split(" ").slice(-1)[0]}`
                     : badgeModalCred.studentName}
                 </h5>
-              </div>
-
-              {/* Masked / Public Hash Display */}
-              <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500 font-mono">
-                <span>Hardhat #31337</span>
-                <span>
-                  {privacyMode ? "ZK-Proof Verified [Masked]" : badgeModalCred.issuedAt}
-                </span>
               </div>
             </div>
 

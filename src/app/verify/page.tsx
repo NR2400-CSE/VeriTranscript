@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, decodeEventLog } from "viem";
 import { hardhat } from "viem/chains";
 
 const publicClient = createPublicClient({
@@ -13,29 +13,30 @@ const publicClient = createPublicClient({
 const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ||
   "0x5FbDB2315678afecb367f032d93F642f64180aa3") as `0x${string}`;
 
-const CONTRACT_ABI = [
+const CREDENTIAL_ISSUED_EVENT_ABI = [
   {
-    inputs: [{ internalType: "bytes32", name: "_docHash", type: "bytes32" }],
-    name: "verifyCredential",
-    outputs: [
-      {
-        components: [
-          { internalType: "bool", name: "isValid", type: "bool" },
-          { internalType: "address", name: "student", type: "address" },
-          { internalType: "string", name: "ipfsURI", type: "string" },
-          { internalType: "string", name: "studentName", type: "string" },
-          { internalType: "string", name: "degreeName", type: "string" },
-          { internalType: "uint256", name: "issueTimestamp", type: "uint256" },
-        ],
-        internalType: "struct AcademicCredentialRegistry.Credential",
-        name: "",
-        type: "tuple",
-      },
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: "bytes32", name: "docHash", type: "bytes32" },
+      { indexed: true, internalType: "address", name: "student", type: "address" },
+      { indexed: false, internalType: "string", name: "ipfsURI", type: "string" },
+      { indexed: false, internalType: "string", name: "studentName", type: "string" },
+      { indexed: false, internalType: "string", name: "degreeName", type: "string" },
+      { indexed: false, internalType: "uint256", name: "timestamp", type: "uint256" },
     ],
-    stateMutability: "view",
-    type: "function",
+    name: "CredentialIssued",
+    type: "event",
   },
 ] as const;
+
+interface CandidateRecord {
+  studentName: string;
+  degreeName: string;
+  studentAddress: string;
+  issuedAt: string;
+  docHash: string;
+  isRevoked: boolean;
+}
 
 function VerifyContent() {
   const searchParams = useSearchParams();
@@ -46,54 +47,121 @@ function VerifyContent() {
   const [originalHash, setOriginalHash] = useState<string>("");
   const [isTamperedMode, setIsTamperedMode] = useState<boolean>(false);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
-  const [credentialData, setCredentialData] = useState<any>(null);
+  const [matchedCandidates, setMatchedCandidates] = useState<CandidateRecord[]>([]);
   const [hasChecked, setHasChecked] = useState<boolean>(false);
-  const [isRevoked, setIsRevoked] = useState<boolean>(false);
-  const [revocationDetails, setRevocationDetails] = useState<any>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
 
-  const verifyHashOnChain = useCallback(async (hash: string) => {
+  const verifyHashOnChain = useCallback(async (hash: string, fileName?: string) => {
     setIsVerifying(true);
     setHasChecked(false);
-    setCredentialData(null);
-    setIsRevoked(false);
-    setRevocationDetails(null);
+    setMatchedCandidates([]);
     setErrorMessage("");
     setComputedHash(hash);
 
     try {
-      const revokedMap = JSON.parse(
-        localStorage.getItem("veritranscript_revocations") || "{}"
+      // 1. Fetch Local Ledger Records
+      const rawVault = localStorage.getItem("veritranscript_vault");
+      let vaultList: any[] = [];
+      if (rawVault) {
+        try {
+          const parsed = JSON.parse(rawVault);
+          vaultList = Array.isArray(parsed) ? parsed : Object.values(parsed);
+        } catch {}
+      }
+
+      // Filter all matching entries in local cache
+      const vaultMatches = vaultList.filter(
+        (v) =>
+          v.docHash?.toLowerCase() === hash.toLowerCase() ||
+          (fileName && v.fileName?.toLowerCase() === fileName.toLowerCase())
       );
-      const revInfo = revokedMap[hash.toLowerCase()];
 
-      if (revInfo) {
-        setIsRevoked(true);
-        setRevocationDetails(revInfo);
+      // 2. Fetch Blockchain Logs
+      const logs = await publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        fromBlock: 0n,
+        toBlock: "latest",
+      });
+
+      const onChainMatches: any[] = [];
+
+      for (const log of logs) {
+        try {
+          const decoded: any = decodeEventLog({
+            abi: CREDENTIAL_ISSUED_EVENT_ABI,
+            data: log.data,
+            topics: log.topics,
+          });
+
+          if (decoded.eventName === "CredentialIssued") {
+            const isDirectHashMatch = decoded.args.docHash.toLowerCase() === hash.toLowerCase();
+            const isVaultHashMatch = vaultMatches.some(
+              (vm) => vm.docHash?.toLowerCase() === decoded.args.docHash.toLowerCase()
+            );
+
+            if (isDirectHashMatch || isVaultHashMatch) {
+              onChainMatches.push(decoded.args);
+            }
+          }
+        } catch {}
       }
 
-      let data: any = null;
-      try {
-        data = await publicClient.readContract({
-          address: CONTRACT_ADDRESS,
-          abi: CONTRACT_ABI,
-          functionName: "verifyCredential",
-          args: [hash as `0x${string}`],
+      // 3. Aggregate all unique candidates found across on-chain logs and vault
+      const candidateList: CandidateRecord[] = [];
+
+      // Add On-Chain Log Matches
+      onChainMatches.forEach((logItem) => {
+        const vMatch = vaultList.find(
+          (v) =>
+            v.docHash?.toLowerCase() === logItem.docHash.toLowerCase() ||
+            (v.studentAddress?.toLowerCase() === logItem.student.toLowerCase() &&
+              v.degreeName?.toLowerCase() === logItem.degreeName.toLowerCase())
+        );
+
+        const timestampNum = Number(logItem.timestamp);
+        const dateStr = timestampNum
+          ? new Date(timestampNum * 1000).toLocaleString()
+          : new Date().toLocaleString();
+
+        candidateList.push({
+          studentName: logItem.studentName || vMatch?.studentName || "Candidate",
+          degreeName: logItem.degreeName || vMatch?.degreeName || "Academic Credential",
+          studentAddress: logItem.student,
+          issuedAt: dateStr,
+          docHash: logItem.docHash,
+          isRevoked: Boolean(vMatch?.isRevoked),
         });
-      } catch {
-        data = null;
-      }
+      });
 
-      if (data && (data.isValid || data[0])) {
-        setCredentialData(data);
+      // Add Vault Matches if not already present
+      vaultMatches.forEach((vItem) => {
+        const alreadyAdded = candidateList.some(
+          (c) =>
+            c.studentAddress.toLowerCase() === vItem.studentAddress?.toLowerCase() &&
+            c.degreeName.toLowerCase() === vItem.degreeName?.toLowerCase()
+        );
+
+        if (!alreadyAdded) {
+          candidateList.push({
+            studentName: vItem.studentName || "Candidate",
+            degreeName: vItem.degreeName || "Academic Credential",
+            studentAddress: vItem.studentAddress || "0x...",
+            issuedAt: vItem.issuedAt || new Date().toLocaleString(),
+            docHash: vItem.docHash || hash,
+            isRevoked: Boolean(vItem.isRevoked),
+          });
+        }
+      });
+
+      if (candidateList.length > 0) {
+        setMatchedCandidates(candidateList);
       } else {
-        setCredentialData(null);
         setErrorMessage(
-          "The computed document hash does not match any active credential on the local registry."
+          "The computed document hash does not match any credential on the local registry."
         );
       }
     } catch (err: any) {
-      setCredentialData(null);
+      console.error(err);
       setErrorMessage("Verification lookup failed.");
     } finally {
       setIsVerifying(false);
@@ -127,7 +195,7 @@ function VerifyContent() {
         setOriginalHash(sha256);
       }
 
-      await verifyHashOnChain(sha256);
+      await verifyHashOnChain(sha256, selectedFile.name);
     } catch (err) {
       console.error("Hashing error:", err);
       setErrorMessage("Failed to calculate document digest.");
@@ -162,20 +230,12 @@ function VerifyContent() {
     }
   };
 
-  const downloadAuditReportPDF = () => {
-    if (!credentialData) return;
-
-    const studentName = credentialData.studentName ?? credentialData[3];
-    const degreeName = credentialData.degreeName ?? credentialData[4];
-    const studentAddress = credentialData.student ?? credentialData[1];
-    const issueDate = new Date(
-      Number(credentialData.issueTimestamp ?? credentialData[5]) * 1000
-    ).toLocaleString();
+  const downloadAuditReportPDF = (candidate: CandidateRecord) => {
     const verificationTime = new Date().toLocaleString();
 
     const pdfReportContent = `%PDF-1.4
 1 0 obj
-<< /Title (Cryptographic Verification Audit Report - ${studentName})
+<< /Title (Cryptographic Verification Audit Report - ${candidate.studentName})
    /Author (VeriTranscript Verification Network)
    /Subject (Blockchain Authentication Record) >>
 endobj
@@ -201,7 +261,7 @@ BT
 0 -25 Td
 (========================================================================) Tj
 0 -25 Td
-(VERIFICATION STATUS   : [ PASS - AUTHENTIC & VALID ON-CHAIN ]) Tj
+(VERIFICATION STATUS   : [ ${candidate.isRevoked ? "REVOKED / INACTIVE" : "PASS - AUTHENTIC & VALID"} ]) Tj
 0 -20 Td
 (VERIFIED TIMESTAMP    : ${verificationTime}) Tj
 0 -20 Td
@@ -211,15 +271,15 @@ BT
 0 -25 Td
 (========================================================================) Tj
 0 -25 Td
-(STUDENT RECIPIENT     : ${studentName}) Tj
+(STUDENT RECIPIENT     : ${candidate.studentName}) Tj
 0 -20 Td
-(DEGREE / CREDENTIAL   : ${degreeName}) Tj
+(DEGREE / CREDENTIAL   : ${candidate.degreeName}) Tj
 0 -20 Td
-(STUDENT WALLET        : ${studentAddress}) Tj
+(STUDENT WALLET        : ${candidate.studentAddress}) Tj
 0 -20 Td
-(ISSUED TIMESTAMP      : ${issueDate}) Tj
+(ISSUED TIMESTAMP      : ${candidate.issuedAt}) Tj
 0 -20 Td
-(DOCUMENT SHA-256 HASH : ${computedHash}) Tj
+(DOCUMENT SHA-256 HASH : ${candidate.docHash}) Tj
 0 -30 Td
 (========================================================================) Tj
 0 -25 Td
@@ -253,41 +313,36 @@ startxref
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `Verification_Audit_Report_${studentName.replace(/\s+/g, "_")}.pdf`;
+    a.download = `Audit_Report_${candidate.studentName.replace(/\s+/g, "_")}.pdf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  const isAuthentic = Boolean(
-    credentialData && (credentialData.isValid ?? credentialData[0]) && !isRevoked
-  );
-
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center py-16 px-4">
       <div className="text-center max-w-xl mb-10">
         <h1 className="text-3xl font-bold tracking-tight">Instant Document Verifier</h1>
         <p className="text-slate-400 text-sm mt-2">
-          Cryptographic validation against the local registry.
+          Cryptographic validation against the local registry across all registered recipients.
         </p>
       </div>
 
-      <div className="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl space-y-6">
+      <div className="max-w-2xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl space-y-6">
         <div className="border-2 border-dashed border-slate-700 rounded-2xl p-8 text-center hover:border-blue-500 transition-colors">
           <input
             type="file"
             id="verify-file"
             onChange={handleDocumentDrop}
             className="hidden"
-            accept=".pdf,.doc,.docx"
           />
           <label htmlFor="verify-file" className="cursor-pointer flex flex-col items-center">
             <span className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-semibold text-white mb-2 transition cursor-pointer">
-              Choose PDF transcript
+              Choose Document / Transcript
             </span>
             <span className="text-sm text-slate-400">
-              {file ? file.name : "Select the document to verify"}
+              {file ? file.name : "Select any document (PDF, DOCX, PNG) to verify all recipients"}
             </span>
           </label>
         </div>
@@ -318,7 +373,7 @@ startxref
 
         {isVerifying && (
           <p className="text-center text-sm text-slate-400 animate-pulse">
-            Querying local Hardhat smart contract...
+            Querying local Hardhat smart contract for all registered candidates...
           </p>
         )}
 
@@ -336,77 +391,72 @@ startxref
           </div>
         )}
 
-        {/* Valid State */}
-        {hasChecked && isAuthentic && (
-          <div className="p-6 bg-emerald-950/40 border border-emerald-500/40 rounded-2xl space-y-5">
-            <div className="flex items-center space-x-3 text-emerald-400">
-              <span className="text-2xl">✓</span>
-              <h3 className="font-bold text-lg">Verification Successful: Authentic</h3>
-            </div>
-            <div className="space-y-2 text-sm text-slate-300">
-              <p>
-                <strong className="text-slate-400">Student:</strong>{" "}
-                {credentialData.studentName ?? credentialData[3]}
-              </p>
-              <p>
-                <strong className="text-slate-400">Degree:</strong>{" "}
-                {credentialData.degreeName ?? credentialData[4]}
-              </p>
-              <p className="break-all">
-                <strong className="text-slate-400">Student Address:</strong>{" "}
-                {credentialData.student ?? credentialData[1]}
-              </p>
-              <p>
-                <strong className="text-slate-400">Issued On:</strong>{" "}
-                {new Date(
-                  Number(credentialData.issueTimestamp ?? credentialData[5]) * 1000
-                ).toLocaleString()}
-              </p>
+        {/* Display All Matching Candidates */}
+        {hasChecked && matchedCandidates.length > 0 && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                Matching On-Chain Recipients ({matchedCandidates.length})
+              </span>
             </div>
 
-            <button
-              onClick={downloadAuditReportPDF}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <span>Download Official Audit Report (PDF)</span>
-            </button>
+            {matchedCandidates.map((cand, idx) => (
+              <div
+                key={idx}
+                className={`p-6 rounded-2xl border space-y-4 transition ${
+                  cand.isRevoked
+                    ? "bg-amber-950/30 border-amber-500/40"
+                    : "bg-emerald-950/30 border-emerald-500/40"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xl">{cand.isRevoked ? "⚠" : "✓"}</span>
+                    <h3 className="font-bold text-base text-white">
+                      {cand.isRevoked ? "Revoked Credential" : "Authentic & Verified"}
+                    </h3>
+                  </div>
+
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                      cand.isRevoked
+                        ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                        : "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                    }`}
+                  >
+                    {cand.isRevoked ? "REVOKED" : "VALID"}
+                  </span>
+                </div>
+
+                <div className="space-y-1.5 text-xs text-slate-300 font-mono">
+                  <p>
+                    <strong className="text-slate-400 font-sans">Student:</strong> {cand.studentName}
+                  </p>
+                  <p>
+                    <strong className="text-slate-400 font-sans">Degree:</strong> {cand.degreeName}
+                  </p>
+                  <p className="break-all">
+                    <strong className="text-slate-400 font-sans">Student Address:</strong>{" "}
+                    {cand.studentAddress}
+                  </p>
+                  <p>
+                    <strong className="text-slate-400 font-sans">Issued On:</strong> {cand.issuedAt}
+                  </p>
+                </div>
+
+                <button
+                  onClick={() => downloadAuditReportPDF(cand)}
+                  className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold shadow transition cursor-pointer"
+                >
+                  Download Audit Report for {cand.studentName} (PDF)
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
-        {/* Revoked State */}
-        {hasChecked && isRevoked && (
-          <div className="p-6 bg-amber-950/40 border border-amber-500/40 rounded-2xl space-y-3">
-            <div className="flex items-center space-x-3 text-amber-400">
-              <span className="text-2xl">⚠</span>
-              <h3 className="font-bold text-lg">Credential Revoked / Inactive</h3>
-            </div>
-            <div className="space-y-2 text-sm text-slate-300">
-              {credentialData && (
-                <>
-                  <p>
-                    <strong className="text-slate-400">Student:</strong>{" "}
-                    {credentialData.studentName ?? credentialData[3]}
-                  </p>
-                  <p>
-                    <strong className="text-slate-400">Degree:</strong>{" "}
-                    {credentialData.degreeName ?? credentialData[4]}
-                  </p>
-                </>
-              )}
-              <p>
-                <strong className="text-amber-400">Reason:</strong>{" "}
-                {revocationDetails?.reason || "Revoked by Institution"}
-              </p>
-              <p>
-                <strong className="text-slate-400">Revocation Date:</strong>{" "}
-                {revocationDetails?.revokedAt}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Tampered / Unregistered State */}
-        {hasChecked && !isAuthentic && !isRevoked && !isVerifying && (
+        {/* Failed / Tampered State */}
+        {hasChecked && matchedCandidates.length === 0 && !isVerifying && (
           <div className="p-6 bg-rose-950/40 border border-rose-500/40 rounded-2xl text-rose-300 space-y-2">
             <div className="flex items-center space-x-2 text-rose-400 font-bold">
               <span>✕</span>
@@ -414,7 +464,7 @@ startxref
             </div>
             <p className="text-xs text-slate-400">
               {errorMessage ||
-                "The computed document hash does not match any active credential on the local registry."}
+                "The computed document hash does not match any registered credential."}
             </p>
           </div>
         )}
