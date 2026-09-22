@@ -2,7 +2,7 @@
 
 A blockchain-based academic credential verification platform. Universities issue tamper-proof digital credentials on-chain; students hold and share them; anyone can verify a credential's authenticity instantly, without contacting the issuing institution.
 
-**Live demo:** _add your deployed URL here_
+**Live demo:**(https://the-campus-ledger.vercel.app)
 
 ## Why
 
